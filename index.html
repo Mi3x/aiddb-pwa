@@ -100,9 +100,23 @@
   #screen-calibration {
     align-items: center;
     justify-content: flex-start;
-    padding: 0.75rem 1rem 1.5rem;
+    padding: 0.75rem 1rem 0;
     gap: 0.6rem;
     overflow-y: auto;
+    position: relative;
+  }
+  .calib-sticky-footer {
+    position: sticky;
+    bottom: 0;
+    width: 100%;
+    background: var(--bg);
+    padding: 0.75rem 1rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: center;
+    border-top: 1px solid var(--border);
+    z-index: 10;
   }
 
   .calib-title { font-size: 1.1rem; font-weight: 700; text-align: center; }
@@ -629,12 +643,14 @@
     </div>
   </div>
 
-  <button class="btn-primary" id="btn-calib-continue" onclick="finishCalibration()" disabled style="max-width:320px">
-    เริ่มขับได้เลย / Continue to drive
-  </button>
-  <button class="btn-secondary" onclick="skipCalibration()" style="max-width:320px">
-    ข้าม — ใช้ค่าเริ่มต้น / Skip
-  </button>
+  <div class="calib-sticky-footer">
+    <button class="btn-primary" id="btn-calib-continue" onclick="finishCalibration()" disabled style="max-width:320px;width:100%">
+      เริ่มขับได้เลย / Continue to drive
+    </button>
+    <button class="btn-secondary" onclick="skipCalibration()" style="max-width:320px;width:100%">
+      ข้าม — ใช้ค่าเริ่มต้น / Skip
+    </button>
+  </div>
 </div>
 
 <!-- ── DRIVE SCREEN ── -->
@@ -655,7 +671,7 @@
     </div>
   </div>
 
-  <div id="no-face-warn">No face detected</div>
+  <div id="no-face-warn">ไม่พบใบหน้า / No face detected</div>
 
   <div id="alert-overlay">
     <div class="alert-card" id="alert-card">
@@ -670,10 +686,10 @@
     background:rgba(0,0,0,0.75);border:0.5px solid rgba(200,150,10,0.3);
     border-radius:10px;padding:8px 10px;width:200px;max-width:55vw">
     <div style="font-size:9px;color:#c8960a;font-weight:500;letter-spacing:0.08em;margin-bottom:4px">
-      การแจ้งเตือนล่าสุด
+      การแจ้งเตือนล่าสุด / Recent alerts
     </div>
     <div id="live-log">
-      <div style="font-size:10px;color:#7a3a3a;padding:4px 0">ยังไม่มีการแจ้งเตือน</div>
+      <div style="font-size:10px;color:#7a3a3a;padding:4px 0">ยังไม่มีการแจ้งเตือน / No alerts yet</div>
     </div>
   </div>
 
@@ -762,12 +778,13 @@ const CFG = {
   BLINK_FRAMES: 4,
   DROWSY_FRAMES: 40,     // was 15 (~0.5s) — now 40 (~1.3s), less sensitive
   SLEEP_FRAMES: 50,      // was 25 (~0.8s) — now 50 (~1.7s)
-  YAWN_THRESH: 0.06,
-  YAWN_FRAMES: 3,
+  YAWN_THRESH: 0.15,          // was 0.06 — now requires wider mouth opening
+  YAWN_FRAMES: 10,            // was 3 (0.1s) — now 10 frames (0.33s)
+  YAWN_COOLDOWN: 150,         // 5 seconds before next yawn alert
   GAZE_FRAMES: 60,        // 2 seconds — faster gaze alert
   GAZE_THRESHOLD: 0.70,   // 70% of frames off-road
   GAZE_COOLDOWN: 90,      // 3s cooldown before next gaze alert
-  SLEEP_OPEN_FRAMES: 150, // 5 seconds for sleeping-with-eyes-open (was 80=2.7s)
+  SLEEP_OPEN_FRAMES: 90,  // 3 seconds for sleeping-with-eyes-open
   SLEEP_OPEN_BLINK_MAX: 0,// zero blinks allowed in window
   FPS: 30,
   CLOUD_URL: null,
@@ -814,7 +831,8 @@ let state = {
   gazeCooldown: 0,
   // New alert state
   blinkHistory: [],            // timestamps of recent blinks for frequent-blink detection
-  lastFatigueAlert: 0,         // minute mark of last fatigue alert
+  lastFatigueAlert: 0,
+  yawnCooldown: 0,             // frames before next yawn alert allowed
   // Alert persistence
   activeAlert: null,
   alertShowTime: 0,            // timestamp when current alert started showing
@@ -979,7 +997,7 @@ function dismissAlert(type) {
           document.getElementById('alert-card').className = 'alert-card';
           if (state.repeatBeepInterval) { clearInterval(state.repeatBeepInterval); state.repeatBeepInterval = null; }
           state.activeAlert = null;
-          updateStatus('Alert', 'safe');
+          updateStatus('ปลอดภัย', 'safe');
         }
       }, remaining);
     } else {
@@ -988,7 +1006,7 @@ function dismissAlert(type) {
       document.getElementById('alert-card').className = 'alert-card';
       if (state.repeatBeepInterval) { clearInterval(state.repeatBeepInterval); state.repeatBeepInterval = null; }
       state.activeAlert = null;
-      updateStatus('Alert', 'safe');
+      updateStatus('ปลอดภัย', 'safe');
     }
   }
 }
@@ -998,7 +1016,7 @@ function updateLiveLog() {
   const el = document.getElementById('live-log');
   if (!el) return;
   if (state.liveLog.length === 0) {
-    el.innerHTML = '<div style="font-size:10px;color:#7a3a3a;padding:4px 0">ยังไม่มีการแจ้งเตือน</div>';
+    el.innerHTML = '<div style="font-size:10px;color:#7a3a3a;padding:4px 0">ยังไม่มีการแจ้งเตือน / No alerts yet</div>';
     return;
   }
   el.innerHTML = state.liveLog.map(a => `
@@ -1190,15 +1208,30 @@ function finishCalibrationMeasure() {
 }
 
 async function finishCalibration() {
-  // Stop calibration camera first before starting drive camera
-  if (calib.camera) {
-    await calib.camera.stop();
-    calib.camera = null;
-  }
-  // Small delay to let camera fully release
-  await new Promise(resolve => setTimeout(resolve, 500));
+  // Disable button immediately to prevent double tap
+  const btn = document.getElementById('btn-calib-continue');
+  if (btn) { btn.disabled = true; btn.textContent = 'กำลังโหลด...'; }
+
+  // Stop calibration camera first
+  try {
+    if (calib.camera) {
+      await calib.camera.stop();
+      calib.camera = null;
+    }
+    if (calib.faceMesh) {
+      calib.faceMesh = null;
+    }
+  } catch(e) { console.warn('Camera stop error:', e); }
+
+  // Wait for camera to fully release
+  await new Promise(resolve => setTimeout(resolve, 800));
+
+  // Switch screen
   showScreen('drive');
-  document.getElementById('loading-msg').style.display = 'flex';
+  const loadingEl = document.getElementById('loading-msg');
+  if (loadingEl) loadingEl.style.display = 'flex';
+
+  // Start drive
   await startDrive();
 }
 
@@ -1243,20 +1276,20 @@ function onResults(results) {
     // Alert 1: No face detected — show warning text after 1 second
     if (state.noFaceCounter === CFG.NO_FACE_THRESH) {
       document.getElementById('no-face-warn').classList.add('show');
-      showAlert('🚫', 'NO FACE DETECTED', 'Please face the camera', 'warn', 'noface');
+      showAlert('🚫', 'ไม่พบใบหน้า!', 'หันหน้าเข้ากล้อง — Please face the camera', 'warn', 'noface');
       logEvent('noface', 'Face not visible');
     }
 
     // Alert 2: Head collapse — face missing for 3+ seconds
     if (state.noFaceCounter === CFG.HEAD_COLLAPSE_THRESH) {
-      showAlert('🆘', 'HEAD COLLAPSE!', 'Unusual head movement detected', 'danger', 'collapse');
+      showAlert('🆘', 'หัวตก! HEAD COLLAPSE!', 'ตรวจพบการเคลื่อนไหวผิดปกติ / Unusual movement', 'danger', 'collapse');
       logEvent('collapse', 'Head collapse or unusual movement');
     }
 
     // Keep repeating head collapse alert every 3s while face is missing
     if (state.noFaceCounter > CFG.HEAD_COLLAPSE_THRESH &&
         state.noFaceCounter % CFG.HEAD_COLLAPSE_THRESH === 0) {
-      showAlert('🆘', 'HEAD COLLAPSE!', 'Driver unresponsive', 'danger', 'collapse');
+      showAlert('🆘', 'หัวตก! HEAD COLLAPSE!', 'คนขับไม่ตอบสนอง — Driver unresponsive', 'danger', 'collapse');
     }
     return;
   }
@@ -1289,7 +1322,7 @@ function onResults(results) {
   const rightEAR = ear(lm, LM.RIGHT_EYE);
   const avgEAR = (leftEAR + rightEAR) / 2;
   const mor = mouthOpenRatio(lm);
-  const isYawning = mor > CFG.YAWN_THRESH;
+  // yawn threshold checked in yawn logic block below
   const gaze = gazeDir(lm);
 
   // EAR / drowsiness logic
@@ -1300,11 +1333,11 @@ function onResults(results) {
     else state.sleepCounter = 0;
 
     if (state.sleepCounter >= CFG.SLEEP_FRAMES) {
-      showAlert('😴', 'WAKE UP!', 'Eyes closed too long', 'danger', 'sleep');
+      showAlert('😴', 'ตื่นได้แล้ว! WAKE UP!', 'หลับตานานเกินไป — Eyes closed too long', 'danger', 'sleep');
       logEvent('sleep', `EAR ${avgEAR.toFixed(2)}`);
       state.sleepCounter = 0;
     } else if (state.drowsyCounter >= CFG.DROWSY_FRAMES) {
-      showAlert('⚠️', 'DROWSINESS ALERT', 'Please stay alert', 'warn', 'drowsy');
+      showAlert('⚠️', 'ง่วงนอน! DROWSY', 'โปรดระวัง — Please stay alert', 'warn', 'drowsy');
       logEvent('drowsy', `EAR ${avgEAR.toFixed(2)}`);
       state.drowsyCounter = 0;
     } else if (state.blinkCounter >= CFG.BLINK_FRAMES) {
@@ -1323,7 +1356,7 @@ function onResults(results) {
       );
       state.blinkHistory.push(now);
       if (state.blinkHistory.length >= CFG.FREQUENT_BLINK_COUNT) {
-        showAlert('⚡', 'FREQUENT BLINKING!', `${state.blinkHistory.length} blinks in 10s — possible fatigue`, 'warn', 'microsleep');
+        showAlert('⚡', 'กะพริบตาบ่อย!', `กะพริบ ${state.blinkHistory.length} ครั้งใน 10 วิ — อาจเหนื่อยล้า`, 'warn', 'microsleep');
         logEvent('microsleep', `${state.blinkHistory.length} blinks in 10s`);
         state.blinkHistory = [];
       }
@@ -1338,12 +1371,16 @@ function onResults(results) {
   }
 
   // Yawn logic
-  if (isYawning) {
+  if (state.yawnCooldown > 0) state.yawnCooldown--;
+
+  const isYawnTriggered = mor > CFG.YAWN_THRESH;
+  if (isYawnTriggered) {
     state.yawnCounter++;
-    if (state.yawnCounter === CFG.YAWN_FRAMES) {
+    if (state.yawnCounter === CFG.YAWN_FRAMES && state.yawnCooldown === 0) {
       state.totalYawns++;
-      showAlert('🥱', 'YAWN DETECTED', 'Consider taking a break', 'warn', 'yawn');
+      showAlert('🥱', 'หาว! YAWN', 'ลองหยุดพักดู — Consider taking a break', 'warn', 'yawn');
       logEvent('yawn', `MOR ${mor.toFixed(2)}`);
+      state.yawnCooldown = CFG.YAWN_COOLDOWN; // 5s cooldown
     }
     updateMetric('m-yawn', 'YES', 'warn');
   } else {
@@ -1374,7 +1411,7 @@ function onResults(results) {
 
     if (offRoad >= required) {
       const dir = leftCount > rightCount ? 'left' : 'right';
-      showAlert('👀', 'LOOK AT THE ROAD', `Looking ${dir} — eyes back on road!`, 'danger', 'gaze');
+      showAlert('👀', 'มองถนนด้วย!', `กำลังมองไปทาง${dir==='left'?'ซ้าย (Looking left)':'ขวา (Looking right)'} — กลับมามองถนน / Eyes back on road!`, 'danger', 'gaze');
       logEvent('gaze', `Looking ${dir} (${Math.round(offRoad/total*100)}% of frames)`);
       state.gazeCooldown = CFG.GAZE_COOLDOWN;
       state.gazeWindow = [];
@@ -1393,7 +1430,7 @@ function onResults(results) {
     if (frontCount >= Math.floor(CFG.SLEEP_OPEN_FRAMES * 0.90) &&
         noBlink === CFG.SLEEP_OPEN_FRAMES &&
         state.gazeCooldown === 0) {
-      showAlert('😶', 'SLEEPING WITH EYES OPEN?', 'Eyes open but not blinking — pull over safely', 'danger', 'sleep');
+      showAlert('😶', 'หลับตาเปิด?', 'ไม่กะพริบตา — จอดรถปลอดภัย / Pull over safely', 'danger', 'sleep');
       logEvent('sleep', 'No blink for 5 seconds staring forward');
       state.gazeCooldown = CFG.GAZE_COOLDOWN;
       state.gazeWindow = [];
@@ -1414,7 +1451,7 @@ function onResults(results) {
         state.lastFatigueAlert = intervalsPassed;
         const hrs = Math.floor(minutesDriven / 60);
         const mins = Math.floor(minutesDriven % 60);
-        showAlert('⏰', 'LONG TRIP FATIGUE', `Driving ${hrs}h ${mins}m — take a break!`, 'warn', 'fatigue');
+        showAlert('⏰', 'ขับนานแล้ว!', `ขับมาแล้ว ${hrs} ชม. ${mins} นาที — หยุดพักเถอะ!`, 'warn', 'fatigue');
         logEvent('fatigue', `Driving ${hrs}h ${mins}m without break`);
       }
     }
@@ -1462,7 +1499,7 @@ async function startDrive() {
   if (state.repeatBeepInterval) clearInterval(state.repeatBeepInterval);
   document.getElementById('alert-overlay').classList.remove('show');
   const liveLogEl = document.getElementById('live-log');
-  if (liveLogEl) liveLogEl.innerHTML = '<div style="font-size:10px;color:#7a3a3a;padding:4px 0">ยังไม่มีการแจ้งเตือน</div>';
+  if (liveLogEl) liveLogEl.innerHTML = '<div style="font-size:10px;color:#7a3a3a;padding:4px 0">ยังไม่มีการแจ้งเตือน / No alerts yet</div>';
 
   Object.assign(state, {
     running: true, startTime: Date.now(),
@@ -1471,6 +1508,7 @@ async function startDrive() {
     gazeCooldown: 0, noFaceCounter: 0,
     blinkHistory: [],
     lastFatigueAlert: 0,
+    yawnCooldown: 0,
     activeAlert: null, alertShowTime: 0, repeatBeepInterval: null,
     liveLog: [],
     events: [], gazeWindow: [], blinkWindow: [], frameCount: 0,
