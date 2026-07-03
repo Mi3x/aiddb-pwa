@@ -1185,8 +1185,15 @@ function finishCalibrationMeasure() {
 }
 
 async function finishCalibration() {
+  // Stop calibration camera first before starting drive camera
+  if (calib.camera) {
+    await calib.camera.stop();
+    calib.camera = null;
+  }
+  // Small delay to let camera fully release
+  await new Promise(resolve => setTimeout(resolve, 500));
   showScreen('drive');
-  document.getElementById('loading-msg').style.display = 'flex'; // show loading
+  document.getElementById('loading-msg').style.display = 'flex';
   await startDrive();
 }
 
