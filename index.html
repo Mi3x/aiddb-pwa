@@ -908,15 +908,16 @@ function mouthOpenRatio(lm) {
 // Head drop detection — measures how far nose has dropped below eye level
 // Works even when face is still visible to camera
 function headDropRatio(lm) {
-  const leftEyeY = lm[LM.LEFT_EYE_CENTER].y;
-  const rightEyeY = lm[LM.RIGHT_EYE_CENTER].y;
+  // Use stable eye corner landmarks (33 = left outer, 263 = right outer)
+  const leftEyeY = lm[33].y;
+  const rightEyeY = lm[263].y;
   const eyeLevelY = (leftEyeY + rightEyeY) / 2;
   const noseY = lm[LM.NOSE_TIP].y;
   const chinY = lm[LM.CHIN].y;
   const faceHeight = chinY - eyeLevelY;
-  if (faceHeight < 0.01) return 0; // invalid
-  // How far nose has dropped as fraction of eye-to-chin distance
-  // Normal: ~0.4-0.6 | Nodding: 0.68+ | Dropping: 0.75+ | Collapsing: 0.82+
+  if (faceHeight < 0.01) return 0;
+  // How far nose sits between eye level and chin
+  // Below-face camera: normal ~0.35-0.55 | head dropping: ratio INCREASES
   return (noseY - eyeLevelY) / faceHeight;
 }
 
@@ -1076,10 +1077,10 @@ function updateLiveLog() {
   const countEl = document.getElementById('log-count');
   if (!el) return;
 
-  // Update pill count
+  // Update pill — show "latest" not count (Option A: no number confusion)
   if (countEl) {
     countEl.textContent = state.liveLog.length === 0
-      ? 'ยังไม่มี' : `${state.liveLog.length} alerts`;
+      ? 'ยังไม่มี' : 'ล่าสุด / Latest';
   }
 
   if (state.liveLog.length === 0) {
@@ -1601,8 +1602,9 @@ function onResults(results) {
   }
 
   updateMetric('m-blink', state.totalBlinks, state.totalBlinks > 30 ? 'warn' : 'ok');
-  updateMetric('m-gaze', gaze,
-    gaze === 'down' ? 'bad' : gaze !== 'front' ? 'warn' : 'ok');
+  // Show head drop ratio in gaze metric for debugging/tuning
+  updateMetric('m-gaze', `${gaze} ${hdr.toFixed(2)}`,
+    hdr >= CFG.HEAD_NOD_RATIO ? 'bad' : gaze !== 'front' ? 'warn' : 'ok');
 }
 
 async function startDrive() {
@@ -1700,7 +1702,7 @@ function buildSummary() {
 
   const container = document.getElementById('events-container');
   container.innerHTML = '';
-  const recent = state.events.slice(-3).reverse();
+  const recent = state.events.slice(-8).reverse();
   if (recent.length === 0) {
     container.innerHTML = '<div style="color:var(--muted);font-size:0.8rem;padding:0.5rem 0">No events recorded</div>';
   } else {
