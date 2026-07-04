@@ -821,6 +821,13 @@ const CFG = {
   FATIGUE_MINUTES: 120,
   FATIGUE_INTERVAL: 30,
   MIN_DISPLAY_MS: 3000,        // minimum alert display time in ms before dismiss allowed
+  // Head drop detection (face visible but head collapsing)
+  HEAD_NOD_RATIO: 0.68,        // nose drops below 68% of eye-to-chin = nodding
+  HEAD_DROP_RATIO: 0.75,       // nose drops below 75% = significant drop
+  HEAD_COLLAPSE_RATIO: 0.82,   // nose drops below 82% = full collapse
+  HEAD_NOD_FRAMES: 20,         // 0.7s nodding → upgrade drowsy alert
+  HEAD_DROP_FRAMES: 40,        // 1.3s drop → HEAD NODDING alert
+  HEAD_COLLAPSE_VIS_FRAMES: 60,// 2s full collapse → HEAD COLLAPSE alert
 };
 
 const LM = {
@@ -833,6 +840,8 @@ const LM = {
   RIGHT_JAW: [454, 323, 361, 288],
   FOREHEAD: 10,   // top of head
   CHIN: 152,      // bottom of chin
+  LEFT_EYE_CENTER: 159,   // left eye center — for head drop detection
+  RIGHT_EYE_CENTER: 386,  // right eye center — for head drop detection
   // Down detection uses nose-to-chin / nose-to-forehead distance ratio
   // Correct for below-face camera (dashboard / air vent mount)
 };
@@ -856,6 +865,8 @@ let state = {
   blinkHistory: [],            // timestamps of recent blinks for frequent-blink detection
   lastFatigueAlert: 0,
   yawnCooldown: 0,             // frames before next yawn alert allowed
+  headDropCounter: 0,          // frames head has been dropping
+  headDropLevel: 0,            // 0=normal 1=nod 2=drop 3=collapse
   // Alert persistence
   activeAlert: null,
   alertShowTime: 0,            // timestamp when current alert started showing
@@ -892,6 +903,21 @@ function ear(lm, indices) {
 function mouthOpenRatio(lm) {
   return dist(lm[LM.MOUTH_TOP], lm[LM.MOUTH_BOT]) /
     (dist(lm[LM.MOUTH_L], lm[LM.MOUTH_R]) + 0.001);
+}
+
+// Head drop detection — measures how far nose has dropped below eye level
+// Works even when face is still visible to camera
+function headDropRatio(lm) {
+  const leftEyeY = lm[LM.LEFT_EYE_CENTER].y;
+  const rightEyeY = lm[LM.RIGHT_EYE_CENTER].y;
+  const eyeLevelY = (leftEyeY + rightEyeY) / 2;
+  const noseY = lm[LM.NOSE_TIP].y;
+  const chinY = lm[LM.CHIN].y;
+  const faceHeight = chinY - eyeLevelY;
+  if (faceHeight < 0.01) return 0; // invalid
+  // How far nose has dropped as fraction of eye-to-chin distance
+  // Normal: ~0.4-0.6 | Nodding: 0.68+ | Dropping: 0.75+ | Collapsing: 0.82+
+  return (noseY - eyeLevelY) / faceHeight;
 }
 
 function gazeDir(lm) {
@@ -1403,7 +1429,41 @@ function onResults(results) {
   // yawn threshold checked in yawn logic block below
   const gaze = gazeDir(lm);
 
-  // EAR / drowsiness logic
+  // ── HEAD DROP DETECTION (face visible but head collapsing) ──
+  const hdr = headDropRatio(lm);
+
+  if (hdr >= CFG.HEAD_NOD_RATIO) {
+    state.headDropCounter++;
+    const lvl = hdr >= CFG.HEAD_COLLAPSE_RATIO ? 3
+               : hdr >= CFG.HEAD_DROP_RATIO ? 2 : 1;
+    state.headDropLevel = Math.max(state.headDropLevel, lvl);
+
+    if (state.headDropCounter === CFG.HEAD_COLLAPSE_VIS_FRAMES && lvl >= 3) {
+      // Full collapse — face visible but head fully dropped
+      showAlert('🆘', 'หัวตก! HEAD COLLAPSE!',
+        'หัวตกขณะมองกล้อง — Head collapsed while facing camera', 'danger', 'collapse');
+      logEvent('collapse', `Head drop ratio ${hdr.toFixed(2)} — visible face`);
+    } else if (state.headDropCounter === CFG.HEAD_DROP_FRAMES && lvl >= 2) {
+      // Significant drop
+      showAlert('😪', 'หัวก้ม! HEAD NODDING',
+        'หัวก้มลงมาก — กรุณาระวัง / Head dropping significantly', 'danger', 'drowsy');
+      logEvent('collapse', `Head nodding ratio ${hdr.toFixed(2)}`);
+    } else if (state.headDropCounter === CFG.HEAD_NOD_FRAMES && lvl >= 1) {
+      // Early nod — upgrade to drowsy warning
+      showAlert('⚠️', 'ง่วงนอน! DROWSY',
+        'หัวเริ่มก้ม — Head starting to nod / Stay alert', 'warn', 'drowsy');
+      logEvent('drowsy', `Head nod detected ratio ${hdr.toFixed(2)}`);
+    }
+  } else {
+    // Head back to normal — reset
+    if (state.headDropCounter > 0) {
+      state.headDropCounter = 0;
+      state.headDropLevel = 0;
+      dismissAlert('collapse');
+    }
+  }
+
+  // ── EAR / drowsiness logic ──
   if (avgEAR < CFG.EAR_THRESH) {
     state.blinkCounter++;
     state.drowsyCounter++;
@@ -1587,6 +1647,7 @@ async function startDrive() {
     blinkHistory: [],
     lastFatigueAlert: 0,
     yawnCooldown: 0,
+    headDropCounter: 0, headDropLevel: 0,
     activeAlert: null, alertShowTime: 0, repeatBeepInterval: null,
     liveLog: [],
     events: [], gazeWindow: [], blinkWindow: [], frameCount: 0,
@@ -1644,10 +1705,15 @@ function buildSummary() {
     container.innerHTML = '<div style="color:var(--muted);font-size:0.8rem;padding:0.5rem 0">No events recorded</div>';
   } else {
     const labels = {
-      blink:'Blink', drowsy:'Drowsiness', sleep:'Sleep alert',
-      yawn:'Yawn', gaze:'Gaze alert', noface:'No face detected',
-      collapse:'Head collapse', microsleep:'Frequent blinking', phone:'Phone distraction',
-      fatigue:'Long trip fatigue'
+      blink:'กะพริบตา / Blink',
+      drowsy:'ง่วงนอน / Drowsiness',
+      sleep:'หลับตา / Sleep alert',
+      yawn:'หาว / Yawn',
+      gaze:'มองออกนอกถนน / Gaze alert',
+      noface:'ไม่พบใบหน้า / No face',
+      collapse:'หัวตก / Head collapse & nod',
+      microsleep:'กะพริบตาบ่อย / Frequent blinking',
+      fatigue:'ขับนานแล้ว / Long trip fatigue'
     };
     recent.forEach(ev => {
       container.innerHTML += `
