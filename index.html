@@ -1639,7 +1639,7 @@ function buildSummary() {
 
   const container = document.getElementById('events-container');
   container.innerHTML = '';
-  const recent = state.events.slice(-8).reverse();
+  const recent = state.events.slice(-3).reverse();
   if (recent.length === 0) {
     container.innerHTML = '<div style="color:var(--muted);font-size:0.8rem;padding:0.5rem 0">No events recorded</div>';
   } else {
